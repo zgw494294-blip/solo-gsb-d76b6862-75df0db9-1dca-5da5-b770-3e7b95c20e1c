@@ -1,0 +1,19 @@
+services:
+  api:
+    build: .
+    image: gs1-recall-check:latest
+    ports:
+      - "8000:8000"
+    environment:
+      # 容器内本地信任文件路径(由下方只读挂载提供)
+      RECALL_TRUST_FILE: /srv/trust/recall-keys.json
+    volumes:
+      # 本地信任文件只读挂载;轮换密钥时在宿主机替换此文件即可,不联网取钥
+      - ./trust/recall-keys.json:/srv/trust/recall-keys.json:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
