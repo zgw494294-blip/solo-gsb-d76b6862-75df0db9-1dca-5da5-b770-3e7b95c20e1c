@@ -188,6 +188,59 @@ class CustodyAuditResponse(BaseModel):
     errors: list[CustodyEventError]  # 按原始下标排序
 
 
+# ---------- 交接日志最少剔除 (/v1/custody/trim) ----------
+
+
+def _locked_index_strict(value: object) -> object:
+    # JSON 数字经 pydantic 宽松模式会把 0.0 这类整数浮点强转为 int;
+    # 下标须是真正的整数(布尔值同样拒绝)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("locked_indices 下标须为整数")
+    return value
+
+
+LockedIndex = Annotated[int, BeforeValidator(_locked_index_strict)]
+
+
+class CustodyTrimRequest(BaseModel):
+    """交接日志最少剔除请求:1~300 条现有格式交接事件 + 可选锁定事件原下标。
+
+    locked_indices 重复或越界(相对 events 下标)时整个请求返回 422;
+    锁定事件必须剔除(扫描非法 / 缺序列号)或无法同时保留时亦返回 422。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    events: list[CustodyEvent] = Field(min_length=1, max_length=300)
+    locked_indices: list[LockedIndex] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _locked_indices_valid(self) -> "CustodyTrimRequest":
+        count = len(self.events)
+        seen: set[int] = set()
+        for index in self.locked_indices:
+            if index < 0 or index >= count:
+                raise ValueError(f"locked_indices 下标 {index} 越界: events 共 {count} 条")
+            if index in seen:
+                raise ValueError(f"locked_indices 下标 {index} 重复")
+            seen.add(index)
+        return self
+
+
+class CustodyTrimItem(BaseModel):
+    """保留子序列中的一件实物及其最终持有人;未保留任何事件的实物不列出。"""
+
+    gtin: str
+    serial: str
+    holder: str  # 最终持有人:最后一条保留事件的 to_location
+
+
+class CustodyTrimResponse(BaseModel):
+    kept_indices: list[int]  # 保留事件的原下标,按处理顺序(UTC 升序,同刻输入顺序)
+    removed_indices: list[int]  # 剔除事件的原下标,按原下标升序
+    items: list[CustodyTrimItem]  # 保留实物(GTIN+序列号)与最终持有人,按 GTIN、序列号排序
+
+
 # ---------- 装拆包装审计 (/v1/packing/audit) ----------
 
 

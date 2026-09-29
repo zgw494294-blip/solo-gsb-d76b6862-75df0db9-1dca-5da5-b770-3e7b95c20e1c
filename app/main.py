@@ -12,6 +12,8 @@ from .models import (
     CheckResponse,
     CustodyAuditRequest,
     CustodyAuditResponse,
+    CustodyTrimRequest,
+    CustodyTrimResponse,
     IsolationPlanRequest,
     IsolationPlanResponse,
     PackingAuditRequest,
@@ -27,11 +29,12 @@ from .packing import audit_packing
 from .receiving import reconcile
 from .relations import analyze_rule_relations
 from .signed import check_signed
+from .trim import trim_custody
 
 app = FastAPI(
     title="GS1 扫码核验 API",
-    version="1.6.0",
-    summary="解析 GS1 扫描串(AI 01/10/17/21):召回规则匹配、EdDSA 签名核验、规则关系分析、实物交接重放、装拆包装审计、召回隔离计划与到货核对",
+    version="1.7.0",
+    summary="解析 GS1 扫描串(AI 01/10/17/21):召回规则匹配、EdDSA 签名核验、规则关系分析、实物交接重放、交接日志最少剔除、装拆包装审计、召回隔离计划与到货核对",
 )
 
 
@@ -58,6 +61,12 @@ def recall_check_signed(request: SignedCheckRequest) -> SignedCheckResponse:
 def custody_audit(request: CustodyAuditRequest) -> CustodyAuditResponse:
     """按时间(UTC 升序)重放交接事件,审计每件实物(GTIN+序列号)的持有人流转。"""
     return audit_custody(request)
+
+
+@app.post("/v1/custody/trim", response_model=CustodyTrimResponse, tags=["custody"])
+def custody_trim(request: CustodyTrimRequest) -> CustodyTrimResponse:
+    """在现有交接事件中选择保留子序列:剔除总数最少,并列时保留序列字典序最小。"""
+    return trim_custody(request)
 
 
 @app.post("/v1/packing/audit", response_model=PackingAuditResponse, tags=["packing"])
