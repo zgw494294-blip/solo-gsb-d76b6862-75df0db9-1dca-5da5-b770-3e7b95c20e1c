@@ -188,6 +188,46 @@ class CustodyAuditResponse(BaseModel):
     errors: list[CustodyEventError]  # 按原始下标排序
 
 
+# ---------- 交接日志最少剔除方案 (/v1/custody/removal-plan) ----------
+
+# 锁定下标:整数(复用 _reject_bool,拒绝布尔值)
+LockedIndex = Annotated[int, BeforeValidator(_reject_bool)]
+
+
+class CustodyRemovalPlanRequest(BaseModel):
+    """最少剔除方案请求:交接事件同交接审计,另可指定必须保留的事件原下标。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    events: list[CustodyEvent] = Field(min_length=1, max_length=300)
+    locked_indices: list[LockedIndex] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _locked_indices_valid(self) -> "CustodyRemovalPlanRequest":
+        if len(set(self.locked_indices)) != len(self.locked_indices):
+            raise ValueError("锁定下标必须唯一")
+        count = len(self.events)
+        for index in self.locked_indices:
+            if not 0 <= index < count:
+                raise ValueError(f"锁定下标 {index} 越界: 事件共 {count} 条")
+        return self
+
+
+class CustodyRemovalItem(BaseModel):
+    """一件至少保留了一条事件的实物及其最终持有人。"""
+
+    gtin: str
+    serial: str
+    events: list[int]  # 保留事件的原下标,按处理顺序(时间升序)排列
+    holder: str  # 最终持有人:最后一条保留事件的 to_location
+
+
+class CustodyRemovalPlanResponse(BaseModel):
+    kept_indices: list[int]  # 保留事件的原下标,按处理顺序排列;最少剔除前提下字典序最小
+    removed_indices: list[int]  # 剔除事件的原下标(含非法扫描),按原下标升序
+    items: list[CustodyRemovalItem]  # 保留实物,按 GTIN、序列号排序
+
+
 # ---------- 装拆包装审计 (/v1/packing/audit) ----------
 
 

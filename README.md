@@ -1,11 +1,12 @@
 # GS1 扫码核验 API
 
-基于 FastAPI 的 GS1 条码解析服务,提供七个接口:
+基于 FastAPI 的 GS1 条码解析服务,提供八个接口:
 
 - **召回核验**:上传一批扫描串和一批召回规则,逐条返回解析出的字段(GTIN / 批号 / 序列号 / 日期)以及命中的规则 ID。
 - **签名召回核验**:扫描串之外,召回规则装在 compact JWS(EdDSA / Ed25519 签名)载荷里;先验签名、有效期与授权 GTIN 前缀,全部通过才返回 kid 与原扫码核验结果。公钥只来自本地信任文件。
 - **召回规则关系分析**:上传 2~100 条召回规则,上线前找出不可能命中任何合法扫描串的规则,以及命中集合有交集的规则对(等价 / 包含 / 部分相交),每对附一条同时命中两者的证据扫描串。
 - **交接审计**:上传一批实物交接事件,按时间重放并审计每件实物(GTIN + 序列号)的持有人流转,返回成功事件与失败原因。
+- **交接日志最少剔除**:上传一批实物交接事件(可指定必须保留的锁定事件),在交接约束下选出保留子序列使剔除总数最少,并列时保留下标序列字典序最小,返回保留下标、剔除下标与保留实物的最终持有人。
 - **装拆包装审计**:上传一批按顺序执行的装入 / 取出操作,重放并审计实物(GTIN + 序列号)间的直接包装关系,返回涉及实物的直接父件 / 子件 / 最外层容器与失败原因。
 - **召回隔离计划**:上传库存扫描、召回规则、装拆操作与已封签实物扫描串,命中召回的实物沿最终包装父链归并到最高层已封签祖先,输出隔离单元。
 - **到货核对**:上传 1~60 条到货实扫与 1~60 条期望明细行,解析、去重并在名额约束下做全局最优核销,返回每条扫描的分配行、缺额(行剩余数量)与多余扫描。
@@ -27,6 +28,7 @@ docker compose up --build
 - 签名召回核验:`POST http://localhost:8000/v1/recall/check-signed`
 - 召回规则关系分析:`POST http://localhost:8000/v1/recall/rule-relations`
 - 交接审计:`POST http://localhost:8000/v1/custody/audit`
+- 交接日志最少剔除:`POST http://localhost:8000/v1/custody/removal-plan`
 - 装拆包装审计:`POST http://localhost:8000/v1/packing/audit`
 - 召回隔离计划:`POST http://localhost:8000/v1/recall/isolation-plan`
 - 到货核对:`POST http://localhost:8000/v1/receiving/reconcile`
@@ -377,6 +379,69 @@ curl -s http://localhost:8000/v1/custody/audit \
   }'
 ```
 
+### `POST /v1/custody/removal-plan`
+
+为交接日志生成**最少剔除方案**:在交接约束下挑选一个保留子序列,使被剔除的事件总数最少;可指定必须保留的锁定事件。
+
+请求体:
+
+| 字段 | 类型 | 约束 |
+| --- | --- | --- |
+| `events` | `object[]` | 1~300 条交接事件,字段格式同交接审计 |
+| `locked_indices` | `integer[]` | 可选,必须保留的事件原下标;重复或越界(不在 `0~事件数-1` 内)时整个请求返回 **422** |
+
+处理规则:
+
+1. 事件按 `occurred_at` **转 UTC 后升序**处理,同一时刻依输入顺序;实物由 **GTIN + AI 21 序列号**标识。
+2. 扫描非法或缺少 AI 21 序列号的事件**必须剔除**;若被锁定,整个请求返回 **422**。
+3. 保留子序列须满足(判定基准为**上一条保留事件**):
+   - 每件实物**首条**保留事件的 `from_location` 须为 `null`;
+   - 后续保留事件的 `from_location` 须等于上一条保留事件的 `to_location`;
+   - 批号(AI 10)、有效期(AI 17)须与首条保留事件一致(**含字段缺失**);
+   - 锁定事件必须全部保留,无法同时保留时整个请求返回 **422**。
+4. 优化目标:**剔除总数最少**(即保留最多);并列时按处理顺序排列的**保留原下标序列**取**字典序最小**(注意是全局合并后的序列,不是逐实物各自最优)。
+
+响应:
+
+```json
+{
+  "kept_indices": [0, 2],
+  "removed_indices": [1],
+  "items": [
+    { "gtin": "09506001123454", "serial": "SN9", "events": [0, 2], "holder": "WH-C" }
+  ]
+}
+```
+
+- `kept_indices`:保留事件的原下标,按**处理顺序**(时间升序)排列。
+- `removed_indices`:剔除事件的原下标(含非法扫描、缺序列号与未保留事件),按**原下标升序**。
+- `items`:至少保留一条事件的实物,按 **GTIN、序列号**排序;`events` 为该实物保留事件的原下标(处理顺序),`holder` 为最后一条保留事件的 `to_location`。**未保留任何事件的实物不列出**。
+- 保留子序列满足交接审计的全部成功约束:把保留事件单独送入 `/v1/custody/audit` 重放,全部成功且持有人流转与 `items` 一致。
+- 请求体不合法(事件数量超限、`occurred_at` 缺时区、`to_location` 为空、字段缺失或多余、锁定下标重复或越界等),或锁定事件必须剔除 / 无法同时保留时,整个请求返回 **422**。
+
+示例:下标 1 的事件 `from_location` 与链断裂必须剔除;下标 2 被锁定必须保留。
+
+```bash
+curl -s http://localhost:8000/v1/custody/removal-plan \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "events": [
+      {"scan": "01095060011234541725123110LOT1\u001d21SN9",
+       "occurred_at": "2026-09-01T09:00:00+08:00",
+       "from_location": null, "to_location": "WH-A"},
+      {"scan": "01095060011234541725123110LOT1\u001d21SN9",
+       "occurred_at": "2026-09-01T10:00:00+08:00",
+       "from_location": "WH-X", "to_location": "WH-B"},
+      {"scan": "01095060011234541725123110LOT1\u001d21SN9",
+       "occurred_at": "2026-09-01T11:00:00+08:00",
+       "from_location": "WH-A", "to_location": "WH-C"}
+    ],
+    "locked_indices": [2]
+  }'
+```
+
+响应中 `kept_indices` 为 `[0, 2]`,`removed_indices` 为 `[1]`,实物 `SN9` 的最终持有人为 `WH-C`。
+
 ### `POST /v1/packing/audit`
 
 审计一批**按输入顺序执行**的装入 / 取出操作:父件与子件均以 GS1 扫描串给出(语法同召回核验),以 **GTIN + AI 21 序列号**唯一识别实物;重放后返回成功操作涉及的全部实物及其当前包装关系,以及失败操作的原因。
@@ -627,6 +692,7 @@ app/
   signed.py    # /v1/recall/check-signed:验签 / 时间窗 / 前缀授权
   relations.py # 召回规则关系分析(命中集合比较与证据扫描串构造)
   custody.py   # 实物交接审计(按时间重放事件,维护持有人)
+  removal.py   # 交接日志最少剔除方案(位图 DP + 全局贪心:剔除最少、下标序列字典序最小)
   packing.py   # 装拆包装审计(按输入顺序重放装/拆操作,维护父子关系)
   isolation.py # 召回隔离计划(命中实物沿最终父链归并到最高层已封签祖先)
   receiving.py # 到货核对(扫描解析/去重 + 最小费用最大流全局最优核销)
@@ -635,6 +701,7 @@ tests/
   test_recall_signed.py
   test_relations.py
   test_custody.py
+  test_removal.py
   test_packing.py
   test_isolation.py
   test_receiving.py

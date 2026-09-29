@@ -1,4 +1,4 @@
-"""GS1 扫码核验 API:召回规则匹配 + 实物交接审计。"""
+"""GS1 扫码核验 API:召回规则匹配 + 实物交接审计 + 交接日志最少剔除方案。"""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ from .models import (
     CheckResponse,
     CustodyAuditRequest,
     CustodyAuditResponse,
+    CustodyRemovalPlanRequest,
+    CustodyRemovalPlanResponse,
     IsolationPlanRequest,
     IsolationPlanResponse,
     PackingAuditRequest,
@@ -26,12 +28,13 @@ from .models import (
 from .packing import audit_packing
 from .receiving import reconcile
 from .relations import analyze_rule_relations
+from .removal import build_removal_plan
 from .signed import check_signed
 
 app = FastAPI(
     title="GS1 扫码核验 API",
-    version="1.6.0",
-    summary="解析 GS1 扫描串(AI 01/10/17/21):召回规则匹配、EdDSA 签名核验、规则关系分析、实物交接重放、装拆包装审计、召回隔离计划与到货核对",
+    version="1.7.0",
+    summary="解析 GS1 扫描串(AI 01/10/17/21):召回规则匹配、EdDSA 签名核验、规则关系分析、实物交接重放、交接日志最少剔除、装拆包装审计、召回隔离计划与到货核对",
 )
 
 
@@ -58,6 +61,18 @@ def recall_check_signed(request: SignedCheckRequest) -> SignedCheckResponse:
 def custody_audit(request: CustodyAuditRequest) -> CustodyAuditResponse:
     """按时间(UTC 升序)重放交接事件,审计每件实物(GTIN+序列号)的持有人流转。"""
     return audit_custody(request)
+
+
+@app.post(
+    "/v1/custody/removal-plan",
+    response_model=CustodyRemovalPlanResponse,
+    tags=["custody"],
+)
+def custody_removal_plan(
+    request: CustodyRemovalPlanRequest,
+) -> CustodyRemovalPlanResponse:
+    """生成交接日志最少剔除方案:剔除数最少,并列时保留下标序列字典序最小。"""
+    return build_removal_plan(request)
 
 
 @app.post("/v1/packing/audit", response_model=PackingAuditResponse, tags=["packing"])
